@@ -1,174 +1,333 @@
 <div align="center">
 
-# SIMD Vector Processing Unit
+# Four-Lane 16-Bit SIMD Vector Processing Unit
 
-**4-Lane · 16-Bit · Verilog HDL**
+**Modern Computer Architecture · Project 11 · Intermediate+**  
+**Newton School of Technology, Rishihood University**
 
-Modern Computer Architecture | Newton School of Technology, Rishihood University
+**Verilog RTL · 4 Parallel ALUs · 64-Bit Vector Datapath · Verified Scalar Baseline · FPGA Evaluation**
 
-![Verilog](https://img.shields.io/badge/HDL-Verilog-2563eb?style=flat-square)
-![SIMD](https://img.shields.io/badge/Architecture-4_Lane_SIMD-0f766e?style=flat-square)
-![Tests](https://img.shields.io/badge/Functional_Checks-32%2F32_Passed-16a34a?style=flat-square)
+[Architecture](#architecture) · [RTL Modules](#rtl-modules) · [Run the Project](#quick-start) · [Verification](#verification-results) · [Performance](#scalar-vs-simd-benchmark) · [FPGA Results](#fpga-synthesis-and-timing) · [Team](#team-and-contributions)
 
 </div>
 
 ## Overview
 
-A four-lane SIMD (Single Instruction, Multiple Data) processing unit that performs the same arithmetic or logical operation on four independent 16-bit elements in parallel. This Phase 1 prototype integrates four ALUs, a vector register file and clock-controlled write-back logic, with self-checking simulations for each component and the integrated core.
+This project designs, implements, and evaluates a **Single Instruction, Multiple Data (SIMD)** processor using synthesizable Verilog. Four independent **16-bit ALUs** execute the same instruction simultaneously on four different data elements. Two **64-bit vector operands** are read from an **8 × 64-bit register file**, processed in parallel, and optionally written back to a destination register.
 
-- **Vector width:** 64 bits (4 × 16 bits)
-- **Register file:** 8 × 64-bit registers, two asynchronous read ports and one synchronous write port
-- **Operations:** ADD, SUB, AND, OR and unsigned less-than comparison
-- **Simulation:** Icarus Verilog and VVP; optional waveform inspection with Surfer
+For a controlled comparison, the project also implements a **single-lane, 16-bit scalar processor** with the same ALU operations and the same **512-bit total register capacity**. Functional simulation, randomized verification, cycle-count benchmarking, iCE40-targeted FPGA synthesis, and place-and-route timing analysis have been performed.
 
-The core accepts register addresses, an opcode and load/execute enables directly. Instruction fetching, decoding and program execution are planned extensions.
+**Key verified findings:** the SIMD core performs four element operations per execution cycle instead of one, reducing the benchmark's simulated execution cycles by **75% (4× cycle speed-up)**. At a common **50 MHz** target both wrapper-equipped FPGA designs passed timing, supporting theoretical peak arithmetic rates of **50 million** versus **200 million 16-bit element operations per second**. These are architectural estimates and simulations—not measurements on a physical board.
 
 ## Architecture
 
-```mermaid
-flowchart LR
-    E[External vector and load address] --> M[Write selection]
-    C[Load / execute controls] -.-> M
-    M --> R[Vector register file<br/>8 x 64 bits]
-    R -->|Vector A| S[SIMD unit<br/>4 parallel 16-bit ALUs]
-    R -->|Vector B| S
-    O[Shared 3-bit opcode] --> S
-    S --> Q[64-bit result]
-    Q -->|Write-back| M
-```
+![Four-lane SIMD datapath: vector control, register file, four ALUs, result combiner and write-back MUX](doc/images/simd_architecture.png)
 
-[Phase 1 block diagram](doc/images/Block_diagram_for_phase_1.jpeg) · [Circuit diagram](doc/images/Circuit_diagram_for_phase_1.jpeg)
+### Hardware specifications
 
-The register file supplies two vectors through asynchronous read ports. The SIMD unit calculates all four lane results combinationally, and the selected vector is written to the register file on the rising clock edge.
+| Feature | SIMD implementation | Scalar reference |
+|---|---|---|
+| Parallel ALU lanes | **4** | **1** |
+| Element width | 16 bits | 16 bits |
+| Datapath width | 64 bits | 16 bits |
+| Register file | 8 × 64-bit vectors | 32 × 16-bit scalars |
+| Total register storage | **512 bits** | **512 bits** |
+| Register access | Two asynchronous reads; one clocked write | Two asynchronous reads; one clocked write |
+| Shared operation select | 3-bit opcode across all lanes | 3-bit opcode |
+| Supported operations | ADD, SUB, AND, OR, unsigned less-than | Same |
+| Write policy | External load has priority; invalid execute opcode does not write | Same |
 
-Lane 0 occupies bits `[15:0]`, lane 1 `[31:16]`, lane 2 `[47:32]` and lane 3 `[63:48]`. Vectors written as lists below use lane order `[lane 0, lane 1, lane 2, lane 3]`; Verilog concatenations place lane 3 first:
+The SIMD core is **not** a full instruction-fetching CPU or a standard vector ISA implementation. Control signals and register addresses are provided by its external interface.
+
+### Per-lane datapath
+
+| Lane | Operand A slice | Operand B slice | Result slice |
+|---|---|---|---|
+| Lane 0 | `[15:0]` | `[15:0]` | `[15:0]` |
+| Lane 1 | `[31:16]` | `[31:16]` | `[31:16]` |
+| Lane 2 | `[47:32]` | `[47:32]` | `[47:32]` |
+| Lane 3 | `[63:48]` | `[63:48]` | `[63:48]` |
+
+Each lane operates independently; addition/subtraction wrap modulo **2^16**, and carries do not cross lane boundaries.
+
+### ALU opcode encoding
+
+| Opcode | Operation | Per-lane behavior |
+|---|---|---|
+| `000` | ADD | `(A + B) mod 2^16` |
+| `001` | SUB | `(A - B) mod 2^16` |
+| `010` | AND | `A & B` |
+| `011` | OR | `A \| B` |
+| `100` | CMP | `1` when unsigned `A < B`, otherwise `0` |
+| `101`–`111` | Invalid/reserved | No execute write-back; ALU default result is zero |
+
+### Control and write-back
+
+The vector control unit generates `reg_we`, `reg_write_addr`, `select_load`, and `opcode_valid` to coordinate the register file and ALUs.
 
 ```verilog
-// Lane order: [10, 20, 30, 40]
-{16'd40, 16'd30, 16'd20, 16'd10}
+assign opcode_valid   = (opcode <= 3'b100);
+assign reg_we         = load_en | (execute_en & opcode_valid);
+assign reg_write_addr = load_en ? load_addr : dst_addr;
+assign reg_write_data = load_en ? load_data : alu_result;
 ```
 
-For example, `[10, 20, 30, 40] + [1, 2, 3, 4]` produces `[11, 22, 33, 44]` in parallel.
+- `load_en = 1`: write external `load_data` to the addressed register at the next rising edge, even if `execute_en` is also asserted.
+- `execute_en = 1` with a valid opcode and no load: write the SIMD result to the destination at the next rising edge.
+- Both disabled, or invalid execution opcode without a load: preserve register contents.
+- The register file has **no reset** in the verified core RTL; initialize source registers before reading them.
 
-| Opcode | Operation | Per-lane result |
-| :---: | :--- | :--- |
-| `000` | ADD | `A + B`, truncated to 16 bits |
-| `001` | SUB | `A - B`, truncated to 16 bits |
-| `010` | AND | Bitwise `A & B` |
-| `011` | OR | Bitwise `A \| B` |
-| `100` | CMP | Unsigned `A < B`: `16'd1` if true, `16'd0` otherwise |
-| `101`–`111` | Unused | `16'd0` |
+## RTL Modules
 
-Arithmetic wraps modulo 65,536 within each lane; carries do not propagate between lanes.
+| File | Purpose |
+|---|---|
+| [`rtl/alu16.v`](rtl/alu16.v) | Combinational 16-bit ALU; shared functionality for SIMD and scalar |
+| [`rtl/simd4.v`](rtl/simd4.v) | Four parallel ALU instances; 64-bit lane slicing and result packing |
+| [`rtl/vector_regfile.v`](rtl/vector_regfile.v) | Eight 64-bit registers; two read ports, one write port |
+| [`rtl/vector_control.v`](rtl/vector_control.v) | Opcode validation, write enables, address selection, load priority |
+| [`rtl/simd_core.v`](rtl/simd_core.v) | Integrated register file, vector control, SIMD execution and write-back |
+| [`rtl/scalar_regfile.v`](rtl/scalar_regfile.v) | 32 × 16-bit register file used by the reference processor |
+| [`rtl/scalar_core.v`](rtl/scalar_core.v) | Single-ALU scalar reference with corresponding control behavior |
 
-### Load and Execute Controls
-
-| `load_en` | `execute_en` | Action on the rising clock edge |
-| :---: | :---: | :--- |
-| `0` | `0` | Preserve all register contents |
-| `1` | `0` | Write `load_data` to `load_addr` |
-| `0` | `1` | Write `alu_result` to `dst_addr` |
-| `1` | `1` | Write `load_data` to `load_addr`; external loading has priority |
-
-Select operands with `src_a_addr` and `src_b_addr`; `src_a_data`, `src_b_data` and `alu_result` expose the current combinational values even when execution is disabled. An asserted enable causes a write on every rising edge, so deassert it after the intended write.
-
-There is no reset or register initialization logic. Load each source register before using it; unwritten registers appear as unknown values in simulation.
-
-## Repository Structure
+## Repository Layout
 
 ```text
 mca-project/
-├── rtl/                  # Hardware modules
+├── rtl/
 │   ├── alu16.v
 │   ├── simd4.v
 │   ├── vector_regfile.v
-│   └── simd_core.v
-├── tb/                   # Self-checking testbenches
+│   ├── vector_control.v
+│   ├── simd_core.v
+│   ├── scalar_regfile.v
+│   ├── scalar_core.v
+│   ├── fpga_timing_stimulus.v     # generated by timing script
+│   ├── scalar_timing_top.v       # generated by timing script
+│   └── simd_timing_top.v         # generated by timing script
+├── tb/
 │   ├── tb_alu16.v
 │   ├── tb_simd4.v
 │   ├── tb_vector_regfile.v
-│   └── tb_simd_core.v
-├── doc/
-│   ├── images/           # Block diagram, circuit diagram and waveform
-│   ├── Presentation/     # Phase 1 presentation PDF
-│   └── Report/           # Phase 1 report PDF
-├── video/                # Phase 1 demonstration video
-├── run_tests.sh          # Regression script
+│   ├── tb_vector_control.v
+│   ├── tb_simd_core.v
+│   ├── tb_simd_random.v
+│   ├── tb_simd_core_advanced.v
+│   ├── tb_scalar_core.v
+│   └── tb_scalar_vs_simd.v
+├── scripts/
+│   └── phase4_timing_v2.sh
+├── results/
+│   ├── benchmark_results.csv
+│   ├── graphs/                   # generated benchmark graphs
+│   └── synthesis/               # generated FPGA logs and netlists
+├── docs/
+│   ├── IEEE_Report/
+│   │   └── IEEE_Project_Report.pdf
+│   └── images/                   # architecture, waveforms, charts
+├── Makefile
+├── run_tests.sh
+├── plot_benchmarks.py
 └── README.md
 ```
 
-## Getting Started
+Build products, timing reports, `.vcd` files, and `.vvp` executables are generated artifacts; their presence depends on which commands have been run. The `README` support package includes `docs/` assets and the timing script, but **does not replace your actual `rtl/` or `tb/` sources**.
 
-Install Icarus Verilog, which supplies both `iverilog` and `vvp`. On macOS with Homebrew:
+## Quick Start
+
+### Prerequisites
+
+- **Icarus Verilog** (`iverilog`, `vvp`) for RTL simulation.
+- **GNU Make** for the viva commands (`make`).
+- **Python 3**, Matplotlib, and NumPy for plotting.
+- **Yosys**, **nextpnr-ice40**, and **IceStorm** for optional FPGA implementation analysis.
+- **Surfer** for viewing `.vcd` waveforms (optional).
+
+On macOS with Homebrew:
 
 ```bash
-brew install icarus-verilog
+brew install icarus-verilog yosys nextpnr-ice40 icestorm
+python3 -m venv .venv
+source .venv/bin/activate
+python3 -m pip install matplotlib numpy
 ```
 
-On Ubuntu/Debian:
-
-```bash
-sudo apt update
-sudo apt install iverilog
-```
-
-Clone the repository and run all four test suites from its root:
+### Run all functional tests
 
 ```bash
 git clone https://github.com/KapilKaranMathur/mca-project.git
 cd mca-project
+make doctor
+make test
+```
+
+Or use the original regression runner:
+
+```bash
 bash run_tests.sh
 ```
 
-If you already have a checkout, run `bash run_tests.sh` in that directory. The script compiles with `iverilog -g2012 -Wall`, runs each testbench with `vvp` and stops on compilation or simulation failure.
+### Viva commands
 
-The tests generate `alu16.vcd`, `simd4.vcd`, `vector_regfile.vcd` and `simd_core.vcd`, along with compiled `.out` files, in the repository root. These generated files are ignored by Git.
+| Command | Action |
+|---|---|
+| `make help` | Show all available commands |
+| `make test-alu` | Check 16-bit ALU operations |
+| `make test-simd` | Verify four parallel lanes |
+| `make test-regfile` | Verify vector register storage |
+| `make test-control` | Exhaustively test vector-control combinations |
+| `make test-core` | Verify basic integrated SIMD core |
+| `make test-random` | Run randomized 4-lane tests |
+| `make test-core-advanced` | Test control dependencies and write-back |
+| `make test-scalar` | Test scalar reference implementation |
+| `make benchmark` | Run matched scalar/SIMD workload and write the CSV |
+| `make graphs` | Regenerate benchmark plots |
+| `make synth` | Synthesize both original processors for iCE40 |
+| `make timing` | Route both wrapper-equipped timing designs |
+| `make summary` | Show LUT, carry, FF, RAM and timing results |
+| `make waves` / `make wave` | List or open available VCD waveforms |
+| `make viva` | Full suite: tests, benchmark, graphs, synthesis and timing |
 
-Inspect the integrated waveform with Surfer, if installed:
-
-```bash
-surfer simd_core.vcd
-```
+**First-run timing setup:** execute `bash scripts/phase4_timing_v2.sh` once to generate `rtl/fpga_timing_stimulus.v`, `rtl/scalar_timing_top.v`, and `rtl/simd_timing_top.v` before `make timing` or `make viva`. The timing script runs synthesis and routing as well. The Makefile's FPGA targets require a local Yosys/nextpnr installation; for a short viva use `make test-core-advanced`, `make benchmark`, and `make wave` first.
 
 ## Verification Results
 
-| Testbench | Checks exercised | Passing checks |
-| :--- | :--- | ---: |
-| [16-bit ALU](tb/tb_alu16.v) | Five operations, comparison outcomes, overflow and underflow | 9/9 |
-| [Four-lane SIMD](tb/tb_simd4.v) | All five operations across four lanes | 5/5 |
-| [Vector register file](tb/tb_vector_regfile.v) | Writes, retention, asynchronous reads and disabled writes | 5/5 |
-| [Integrated SIMD core](tb/tb_simd_core.v) | Vector loading, all five operations and result write-back | 13/13 |
-| **Total** | | **32/32** |
+The team's latest shared simulation logs reported the following results. Rerun the final merged GitHub commit before submission.
 
-All 32 directed functional checks passed with `bash run_tests.sh`. These are individual checks; some integrated scenarios verify both calculation and write-back separately.
+| Testbench | Coverage and result |
+|---|---|
+| `tb_alu16.v` | **9** directed checks passed |
+| `tb_simd4.v` | **5** SIMD vector checks passed |
+| `tb_vector_regfile.v` | **5** register-file checks passed |
+| `tb_vector_control.v` | **2,048** exhaustive control combinations passed |
+| `tb_simd_core.v` | **13** integrated core checks passed |
+| `tb_simd_random.v` | **10,012** vector tests; **40,048** lane checks passed |
+| `tb_simd_core_advanced.v` | **279** transactions; **224** register-readback checks passed |
+| `tb_scalar_core.v` | **59** checks passed |
+| `tb_scalar_vs_simd.v` | **6,800** scalar/SIMD output pairs matched |
 
-![Integrated SIMD core simulation](doc/images/Integrated_core_waveform.png)
+### Evidence: vector control and execution
 
-*Surfer waveform of the integrated core: V0 and V1 are loaded at 15 ns and 25 ns, and the ADD result is written to V2 at 35 ns. The testbench uses a 10 ns clock period; this is a simulation setting, not a measured hardware frequency.*
+![Vector control waveform showing loading, execution, opcode validation, write enable and address selection](doc/images/vector_control_waveform.png)
 
-## Phase 1 Documentation and Demo
+*Figure 1. Vector control unit signals during exhaustive verification.*
 
-- [Project report (PDF)](doc/Report/MCA_phase1_report.pdf)
-- [Presentation (PDF)](doc/Presentation/MCA_phase1_presentation.pdf)
-- [Demonstration video (MP4)](video/MCA_phase1_video.mp4)
+![Randomized SIMD waveform with packed vector inputs, opcode, result and four lane outputs](doc/images/randomized_simd_waveform.png)
 
-## Team Members
+*Figure 2. Randomized verification of the shared opcode and independent 16-bit lane outputs.*
 
-| Name | Enrollment No. | Institutional email | Assigned responsibility |
-| :--- | :--- | :--- | :--- |
-| Agrim Kumar Malhotra | 2401010045 | agrim.malhotra2024@nst.rishihood.edu.in | Core integration and control logic |
-| Aniket Pathak | 2401020088 | aniket.pathak2024@nst.rishihood.edu.in | Four-lane SIMD datapath |
-| Kapil Karan Mathur | 2401010209 | kapil.mathur2024@nst.rishihood.edu.in | ALU and component testing |
-| Rohan Singh | 2401010391 | rohan.singh2024@nst.rishihood.edu.in | Vector register file and testing |
-| Pushpendra Singh Parihar | 2401010361 | pushpendra.parihar2024@nst.rishihood.edu.in | Integrated verification and documentation |
+![Advanced SIMD core waveform showing clock, load/execute controls, source/destination addresses and write-back data](doc/images/advanced_core_waveform.png)
 
-## Current Status & Next Steps
+*Figure 3. Integrated core execution, register access and write-back behavior.*
 
-The Phase 1 RTL prototype and its 32 directed functional checks are complete. Next steps are:
+## Scalar vs SIMD Benchmark
 
-- Expand verification to cover load/execute priority, unused opcodes and additional boundary cases.
-- Add instruction control for sequencing vector operations.
-- Benchmark scalar-versus-SIMD cycle counts and throughput.
-- Synthesize the design and measure resource utilization and maximum frequency.
+The benchmark executes the **same element-wise computation** on both processors for all five operations with **16, 64, 256, and 1,024 elements** each. Every scalar result is compared against its corresponding SIMD result.
 
-Exhaustive verification, measured speed-up and FPGA timing results are not yet available.
+| Elements | Scalar execution cycles | SIMD execution cycles | Scalar load + execute cycles | SIMD load + execute cycles |
+|---:|---:|---:|---:|---:|
+| 16 | 16 | 4 | 48 | 12 |
+| 64 | 64 | 16 | 192 | 48 |
+| 256 | 256 | 64 | 768 | 192 |
+| 1,024 | 1,024 | 256 | 3,072 | 768 |
+
+The cycle counts are identical across ADD, SUB, AND, OR, and CMP for the selected workloads. This yields **4× fewer simulated execution cycles** (75% fewer cycles). The loading-inclusive result also reflects different external data widths: the scalar baseline loads 16 bits per cycle, while SIMD loads 64 bits per cycle.
+
+![Scalar versus SIMD execution cycles](doc/images/execution_cycles.png)
+
+![Scalar versus SIMD execution throughput](doc/images/execution_throughput.png)
+
+To reproduce the CSV and graphics:
+
+```bash
+make benchmark
+make graphs
+# Alternative:
+python3 plot_benchmarks.py results/benchmark_results.csv results/graphs
+```
+
+**Interpretation:** 4× is a *simulated-cycle* improvement for a workload with four independent elements per SIMD operation. It is **not proof of 4× wall-clock speed-up at unrelated maximum clock frequencies**.
+
+## FPGA Synthesis and Timing
+
+**Toolchain:** Yosys + nextpnr-ice40; **target architecture:** Lattice iCE40 HX8K, CT256 package. Synthesis and place-and-route are software-based estimates; no FPGA board was programmed.
+
+### Original core-only synthesis (`synth_ice40`)
+
+| FPGA resource | Scalar core | SIMD core |
+|---|---:|---:|
+| LUT4 cells | 1,032 | 1,229 |
+| Enabled flip-flops (`SB_DFFE`) | 512 | 512 |
+| Carry cells (`SB_CARRY`) | 31 | 124 |
+| Block RAM | 0 | 0 |
+
+**Observation:** the full SIMD core used approximately **19.1% more LUT4 cells** than the scalar core at this synthesis stage, while both provided 512 bits of register storage. The four ALU lanes use four times as many carry cells.
+
+### Matched flop-backed timing-wrapper implementations (`-nobram`)
+
+| FPGA resource / result | Scalar wrapper | SIMD wrapper |
+|---|---:|---:|
+| LUT4 cells | 1,015 | 1,259 |
+| Carry cells | 31 | 124 |
+| Total flip-flops, including wrappers | 614 | 662 |
+| Block RAM | 0 | 0 |
+| Final routed Fmax estimate | **57.05 MHz** | **71.31 MHz** |
+| Timing at a 50 MHz target | **PASS** | **PASS** |
+
+The SIMD timing-wrapper implementation used approximately **24.0% more LUT4 cells**. The different flip-flop counts include input-generation and output-observation registers, not just processor register storage.
+
+**Critical qualification:** these Fmax estimates include the FPGA-facing stimulus and capture wrappers. The observed critical paths involved control/register-write logic; they should **not** be represented as isolated ALU Fmax values. Original cores have wide I/O interfaces, so wrappers were used for a valid device-level place-and-route experiment.
+
+### Theoretical throughput at a common 50 MHz clock
+
+| Metric | Scalar | SIMD |
+|---|---:|---:|
+| Element operations / execution cycle | 1 | 4 |
+| Ideal peak element operations / second | 50 million | 200 million |
+| Relative peak arithmetic throughput | 1× | 4× |
+
+This comparison assumes operands are available and one scalar operation or four SIMD lane operations are issued each cycle. It does not incorporate software overhead, stalls, memory-system bandwidth or physical FPGA measurements.
+
+Reproduce the wrapper-based FPGA experiment:
+
+```bash
+bash scripts/phase4_timing_v2.sh
+# Or use the Makefile after the wrapper RTL files exist:
+make timing
+make summary
+```
+
+Generated reports are saved under `results/synthesis/timing_v2/` or the Makefile's `results/synthesis/viva_timing/` directory.
+
+## Project Report
+
+The [final IEEE-format project report](doc/IEEE_Report/IEEE_Project_Report.pdf) includes the literature review, architecture, verification waveforms, scalar/SIMD comparison, FPGA implementation results, conclusions, references and team contributions.
+
+
+## Team and Contributions
+
+| Team member | Student ID | Assigned workstream for GitHub handoff |
+|---|---|---|
+| Agrim Kumar Malhotra | 2401010045 | Vector control, integrated core and advanced verification |
+| Aniket Pathak | 2401020088 | SIMD lanes, randomized verification, benchmark and graphs |
+| Kapil Karan Mathur | 2401010209 | 16-bit ALU, scalar baseline and unit tests |
+| Rohan Singh | 2401010391 | Vector register file, testbench and FPGA wrappers |
+| Pushpendra Singh Parihar | 2401010361 | Regression runner, integrated verification, IEEE report and documentation |
+
+These are the **agreed responsibility areas for repository handoff**, not independently verified claims of file authorship. Commit history and the final IEEE report's Individual Contributions section should reflect the work each member actually performed.
+
+## Project Status and Limitations
+
+**Completed based on the supplied project logs:** synthesizable RTL, independently tested vector/control modules, integrated verification, randomized self-checking, scalar reference, 6,800 matched benchmark outputs, benchmark plots, Yosys resource analysis and successful 50 MHz place-and-route timing experiments.
+
+**Remaining before final submission:** rerun regressions from the final merged commit, confirm repository image/report links, review contributor attribution, and demonstrate the project using the submitted code.
+
+**Not claimed:** on-board FPGA execution, physical power measurements, complete ISA/processor front end, or independently characterized processor-only maximum frequency.
+
+---
+
+<div align="center">
+
+**Project 11 · Four-Lane 16-Bit SIMD Vector Processing Unit**  
+*Verilog design • Verification • Quantitative benchmarking • FPGA synthesis and timing*
+
+</div>
