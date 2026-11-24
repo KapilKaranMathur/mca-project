@@ -300,7 +300,7 @@ Generated reports are saved under `results/synthesis/timing_v2/` or the Makefile
 
 ## Project Report
 
-The [final IEEE-format project report](doc/IEEE_Report/IEEE_Project_Report.pdf) includes the literature review, architecture, verification waveforms, scalar/SIMD comparison, FPGA implementation results, conclusions, references and team contributions.
+The [final IEEE-format project report](doc/Report/SIMD_Final_IEEE_Project_Report.pdf) includes the literature review, architecture, verification waveforms, scalar/SIMD comparison, FPGA implementation results, conclusions, references and team contributions.
 
 
 ## Team and Contributions
